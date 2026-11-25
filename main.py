@@ -30,13 +30,42 @@ def validate(line: str) -> str:
     raises AssertionError on any gate violation.
     """
     assert isinstance(line, str), "entry must be text"
-    # UTF-8: encoding round-trips only if the text is encodable.
-    line.encode("utf-8")
+    # UTF-8: a lone surrogate (or any non-encodable code point) must fail
+    # here, before anything is written, with a clear message rather than
+    # a bare UnicodeEncodeError from deep inside the write path.
+    try:
+        line.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"entry is not valid UTF-8 text: {exc}") from exc
     assert 1 <= len(line) <= 200, (
         f"entry must be 1-200 characters, got {len(line)}"
     )
     assert line.strip(), "entry must not be only whitespace"
     return line
+
+
+def verify_written(path: str, expected: str) -> None:
+    """Re-read `path` and prove the on-disk file passes the gate.
+
+    The sealed scorer grades the file, not the string in memory, so a
+    write that silently truncated, re-encoded, or corrupted the text
+    would fail the gate even though validate() passed. Read the file
+    back as raw bytes, decode it as strict UTF-8, re-run every gate
+    check on the read-back content, and require the bytes to be
+    exactly the expected UTF-8 encoding of the line we wrote.
+    """
+    raw = open(path, "rb").read()
+    try:
+        back = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"written file is not valid UTF-8: {exc}") from exc
+    assert 1 <= len(back) <= 200, (
+        f"written file must be 1-200 characters, got {len(back)}"
+    )
+    assert back.strip(), "written file must not be only whitespace"
+    assert raw == expected.encode("utf-8"), (
+        "written file bytes differ from the validated entry"
+    )
 
 
 def main() -> None:
@@ -46,7 +75,10 @@ def main() -> None:
     path = os.path.join(outdir, "entry.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write(line)
-    print(f"Wrote {len(line)} chars to {path}")
+        f.flush()
+        os.fsync(f.fileno())
+    verify_written(path, line)
+    print(f"Wrote {len(line)} chars to {path} (verified on disk)")
     print(line)
 
 
